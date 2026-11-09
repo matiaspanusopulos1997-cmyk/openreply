@@ -30,6 +30,36 @@ async function selfId(accessToken: string): Promise<string> {
   return account.id;
 }
 
+async function findGrantedInstagramId(
+  accessToken: string
+): Promise<string | null> {
+  try {
+    const url = new URL(`${facebookGraphBase()}/debug_token`);
+    url.searchParams.set("input_token", accessToken);
+    url.searchParams.set(
+      "access_token",
+      `${requireEnv("INSTAGRAM_APP_ID")}|${requireEnv("INSTAGRAM_APP_SECRET")}`
+    );
+    const data = await handleResponse<{
+      data?: {
+        granular_scopes?: { scope: string; target_ids?: string[] }[];
+      };
+    }>(await fetch(url.toString()));
+    const scopes = data.data?.granular_scopes ?? [];
+    for (const name of [
+      "instagram_basic",
+      "instagram_manage_messages",
+      "instagram_manage_comments",
+    ]) {
+      const id = scopes.find((g) => g.scope === name)?.target_ids?.[0];
+      if (id) return id;
+    }
+  } catch (error) {
+    console.warn("[Meta] debug_token fallback failed:", error);
+  }
+  return null;
+}
+
 async function getAssignedInstagramAccount(
   accessToken: string
 ): Promise<InstagramUser> {
@@ -41,7 +71,28 @@ async function getAssignedInstagramAccount(
   url.searchParams.set("access_token", accessToken);
   const response = await fetch(url.toString());
   const data = await handleResponse<{ data?: InstagramUser[] }>(response);
-  const account = data.data?.[0];
+  let account = data.data?.[0];
+  if (!account) {
+    // Plan B: the token's granted assets are listed by debug_token under
+    // granular_scopes, with the Instagram account id as the target of
+    // instagram_basic. Works even when assigned_instagram_accounts is empty.
+    const targetId = await findGrantedInstagramId(accessToken);
+    if (targetId) {
+      const infoUrl = new URL(`${instagramGraphBase()}/${targetId}`);
+      infoUrl.searchParams.set(
+        "fields",
+        "id,username,name,profile_picture_url,followers_count"
+      );
+      infoUrl.searchParams.set("access_token", accessToken);
+      try {
+        account = await handleResponse<InstagramUser>(
+          await fetch(infoUrl.toString())
+        );
+      } catch {
+        account = { id: targetId, username: targetId };
+      }
+    }
+  }
   if (!account) {
     throw new Error(
       "No Instagram account is assigned to this token. Check that the Facebook Login for Business configuration includes an Instagram account and the business_management permission."
