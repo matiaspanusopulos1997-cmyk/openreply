@@ -121,7 +121,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.redirect(
       `${baseUrl}/settings?instagram=failed&reason=${encodeURIComponent(
-        message.slice(0, 200)
+        message.slice(0, 900)
       )}`
     );
   }

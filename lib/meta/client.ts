@@ -30,6 +30,8 @@ async function selfId(accessToken: string): Promise<string> {
   return account.id;
 }
 
+let lastTokenDiagnostic = "";
+
 async function findGrantedInstagramId(
   accessToken: string
 ): Promise<string | null> {
@@ -46,6 +48,13 @@ async function findGrantedInstagramId(
       };
     }>(await fetch(url.toString()));
     const scopes = data.data?.granular_scopes ?? [];
+    const d = data.data as Record<string, unknown> | undefined;
+    lastTokenDiagnostic = JSON.stringify({
+      type: d?.type,
+      app: d?.app_id,
+      scopes: d?.scopes,
+      granular: scopes.map((g) => `${g.scope}:${(g.target_ids ?? []).length}`),
+    });
     for (const name of [
       "instagram_basic",
       "instagram_manage_messages",
@@ -56,6 +65,7 @@ async function findGrantedInstagramId(
     }
   } catch (error) {
     console.warn("[Meta] debug_token fallback failed:", error);
+    lastTokenDiagnostic = `debug_token failed: ${error instanceof Error ? error.message.slice(0, 160) : "unknown"}`;
   }
   return null;
 }
@@ -72,6 +82,7 @@ async function getAssignedInstagramAccount(
   const response = await fetch(url.toString());
   const data = await handleResponse<{ data?: InstagramUser[] }>(response);
   let account = data.data?.[0];
+  const assignedRaw = JSON.stringify(data).slice(0, 120);
   if (!account) {
     // Plan B: the token's granted assets are listed by debug_token under
     // granular_scopes, with the Instagram account id as the target of
@@ -95,7 +106,7 @@ async function getAssignedInstagramAccount(
   }
   if (!account) {
     throw new Error(
-      "No Instagram account is assigned to this token. Check that the Facebook Login for Business configuration includes an Instagram account and the business_management permission."
+      `No Instagram account is assigned to this token. Check that the Facebook Login for Business configuration includes an Instagram account and the business_management permission. [assigned=${assignedRaw}] [token=${lastTokenDiagnostic}]`
     );
   }
   return { ...account, user_id: account.id };
