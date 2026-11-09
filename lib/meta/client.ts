@@ -1,7 +1,53 @@
 import { getMetaGraphApiVersion, requireEnv } from "@/lib/env";
 
+/**
+ * Meta's newer apps only offer "API setup with Unified login" (Facebook Login
+ * for Business). It issues a system-user token that is used against
+ * graph.facebook.com, with no refresh and with `/me` being the system user, not
+ * the Instagram account. Setting META_CONFIG_ID switches OpenReply to that mode;
+ * without it the original Instagram Login flow is used unchanged.
+ */
+export function isUnifiedLogin(): boolean {
+  return Boolean(process.env.META_CONFIG_ID);
+}
+
 function instagramGraphBase() {
-  return `https://graph.instagram.com/${getMetaGraphApiVersion()}`;
+  return isUnifiedLogin()
+    ? `https://graph.facebook.com/${getMetaGraphApiVersion()}`
+    : `https://graph.instagram.com/${getMetaGraphApiVersion()}`;
+}
+
+// Unified-login tokens belong to a system user, so "me" must be replaced by the
+// Instagram account assigned to that token. Cached per token for the process.
+const igIdCache = new Map<string, string>();
+
+async function selfId(accessToken: string): Promise<string> {
+  if (!isUnifiedLogin()) return "me";
+  const cached = igIdCache.get(accessToken);
+  if (cached) return cached;
+  const account = await getAssignedInstagramAccount(accessToken);
+  igIdCache.set(accessToken, account.id);
+  return account.id;
+}
+
+async function getAssignedInstagramAccount(
+  accessToken: string
+): Promise<InstagramUser> {
+  const url = new URL(`${instagramGraphBase()}/me/assigned_instagram_accounts`);
+  url.searchParams.set(
+    "fields",
+    "id,username,name,profile_picture_url,followers_count"
+  );
+  url.searchParams.set("access_token", accessToken);
+  const response = await fetch(url.toString());
+  const data = await handleResponse<{ data?: InstagramUser[] }>(response);
+  const account = data.data?.[0];
+  if (!account) {
+    throw new Error(
+      "No Instagram account is assigned to this token. Check that the Facebook Login for Business configuration includes an Instagram account and the business_management permission."
+    );
+  }
+  return { ...account, user_id: account.id };
 }
 
 function facebookGraphBase() {
@@ -665,6 +711,7 @@ export async function getConversationMessages(
 }
 
 export async function getUserInfo(accessToken: string): Promise<InstagramUser> {
+  if (isUnifiedLogin()) return getAssignedInstagramAccount(accessToken);
   const url = new URL(`${instagramGraphBase()}/me`);
   url.searchParams.set(
     "fields",
@@ -686,7 +733,7 @@ export async function getUserMedia(
   accessToken: string,
   limit = 25
 ): Promise<InstagramMedia[]> {
-  const url = new URL(`${instagramGraphBase()}/me/media`);
+  const url = new URL(`${instagramGraphBase()}/${await selfId(accessToken)}/media`);
   url.searchParams.set("fields", MEDIA_FIELDS);
   url.searchParams.set("limit", limit.toString());
   url.searchParams.set("access_token", accessToken);
@@ -708,7 +755,7 @@ export async function getAllUserMedia(
 ): Promise<InstagramMedia[]> {
   const results: InstagramMedia[] = [];
 
-  const first = new URL(`${instagramGraphBase()}/me/media`);
+  const first = new URL(`${instagramGraphBase()}/${await selfId(accessToken)}/media`);
   first.searchParams.set("fields", MEDIA_FIELDS);
   first.searchParams.set("limit", String(Math.min(MEDIA_PAGE_SIZE, max)));
   first.searchParams.set("access_token", accessToken);
@@ -827,9 +874,17 @@ export async function getFollowerCountSeries(
   }
 }
 
+// System-user tokens do not expire; store a far-future date so the refresh cron
+// (which looks for tokens near expiry) leaves them alone.
+const UNIFIED_TOKEN_TTL_SECONDS = 10 * 365 * 24 * 3600;
+
 export async function getLongLivedToken(
   shortLivedToken: string
 ): Promise<{ accessToken: string; expiresIn: number }> {
+  // Unified-login system-user tokens never expire and have nothing to exchange.
+  if (isUnifiedLogin()) {
+    return { accessToken: shortLivedToken, expiresIn: UNIFIED_TOKEN_TTL_SECONDS };
+  }
   const url = new URL(`${instagramGraphBase()}/access_token`);
   url.searchParams.set("grant_type", "ig_exchange_token");
   url.searchParams.set("client_secret", requireEnv("INSTAGRAM_APP_SECRET"));
@@ -847,6 +902,9 @@ export async function getLongLivedToken(
 export async function refreshLongLivedToken(
   longLivedToken: string
 ): Promise<{ accessToken: string; expiresIn: number }> {
+  if (isUnifiedLogin()) {
+    return { accessToken: longLivedToken, expiresIn: UNIFIED_TOKEN_TTL_SECONDS };
+  }
   const url = new URL(`${instagramGraphBase()}/refresh_access_token`);
   url.searchParams.set("grant_type", "ig_refresh_token");
   url.searchParams.set("access_token", longLivedToken);
